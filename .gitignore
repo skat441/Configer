@@ -58,3 +58,6 @@ dkms.conf
 *.cfg
 *.rsc
 *.conf
+
+#devices database
+devices.store.enc

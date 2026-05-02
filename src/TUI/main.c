@@ -14,6 +14,7 @@
 
 #define STORE_FILE_PATH "./devices.store.enc"
 #define MENU_MAX_ITEMS 128
+#define TEMP_YAML_PATH "/tmp/configer_devices_edit.yaml"
 
 typedef enum {
     SCREEN_TOP_LEVEL = 0,
@@ -292,7 +293,7 @@ static size_t build_menu(ScreenState screen, MenuItem *items, size_t capacity) {
         items[count++].action = ITEM_EDIT_DEVICE;
         snprintf(items[count].label, sizeof(items[count].label), "Delete device");
         items[count++].action = ITEM_DELETE_DEVICE;
-        snprintf(items[count].label, sizeof(items[count].label), "Bulk edit in editor (JSON)");
+        snprintf(items[count].label, sizeof(items[count].label), "Bulk edit in editor (YAML)");
         items[count++].action = ITEM_BULK_EDIT;
         snprintf(items[count].label, sizeof(items[count].label), "<- Back");
         items[count++].action = ITEM_BACK;
@@ -427,9 +428,9 @@ static int run_editor_for_file(const char *path) {
 }
 
 static int manage_bulk_edit_devices(char *status, size_t status_size) {
-    char *json = NULL;
-    size_t json_len = 0;
-    char tmp_path[] = "/tmp/configer_devices_edit_XXXXXX";
+    char *yaml = NULL;
+    size_t yaml_len = 0;
+    char temp_path[] = "/tmp/configer_devices_edit_XXXXXX";
     int fd;
     FILE *fp;
     long file_len;
@@ -437,52 +438,64 @@ static int manage_bulk_edit_devices(char *status, size_t status_size) {
     CredentialStore updated;
     char errbuf[256];
 
-    if (credential_store_export_json(&g_store, &json, &json_len) != 0) {
-        snprintf(status, status_size, "Failed to export devices");
+    if (credential_store_export_yaml(&g_store, &yaml, &yaml_len) != 0) {
+        snprintf(status, status_size, "Failed to export devices to YAML");
         return -1;
     }
 
-    fd = mkstemp(tmp_path);
+    fd = mkstemp(temp_path);
     if (fd < 0) {
-        free(json);
-        snprintf(status, status_size, "Failed to create temp editor file");
+        free(yaml);
+        snprintf(status, status_size, "Failed to create temp editor file: %s", strerror(errno));
         return -1;
     }
+    
     fp = fdopen(fd, "w");
     if (!fp) {
         close(fd);
-        unlink(tmp_path);
-        free(json);
+        unlink(temp_path);
+        free(yaml);
         snprintf(status, status_size, "Failed to open temp editor file");
         return -1;
     }
-    fwrite(json, 1, json_len, fp);
-    fwrite("\n", 1, 1, fp);
+    
+    fprintf(fp, "# Edit devices in YAML format\n");
+    fprintf(fp, "# Format:\n");
+    fprintf(fp, "# devices:\n");
+    fprintf(fp, "#   - name: \"device-name\"\n");
+    fprintf(fp, "#     type: cisco|mikrotik|juniper\n");
+    fprintf(fp, "#     ip: \"192.168.1.1\"\n");
+    fprintf(fp, "#     username: \"user\"\n");
+    fprintf(fp, "#     password: \"pass\"\n");
+    fprintf(fp, "#\n");
+    fwrite(yaml, 1, yaml_len, fp);
     fclose(fp);
-    free(json);
+    free(yaml);
 
-    if (run_editor_for_file(tmp_path) != 0) {
-        unlink(tmp_path);
+    if (run_editor_for_file(temp_path) != 0) {
+        unlink(temp_path);
         snprintf(status, status_size, "Editor cancelled or failed");
         return -1;
     }
 
-    fp = fopen(tmp_path, "rb");
+    fp = fopen(temp_path, "rb");
     if (!fp) {
-        unlink(tmp_path);
+        unlink(temp_path);
         snprintf(status, status_size, "Failed to read edited file");
         return -1;
     }
+    
     if (fseek(fp, 0, SEEK_END) != 0) {
         fclose(fp);
-        unlink(tmp_path);
+        unlink(temp_path);
         snprintf(status, status_size, "Failed to read edited file");
         return -1;
     }
+    
     file_len = ftell(fp);
     if (file_len < 0 || fseek(fp, 0, SEEK_SET) != 0) {
         fclose(fp);
-        unlink(tmp_path);
+        unlink(temp_path);
         snprintf(status, status_size, "Failed to read edited file");
         return -1;
     }
@@ -490,23 +503,24 @@ static int manage_bulk_edit_devices(char *status, size_t status_size) {
     edited = (char *)calloc(1, (size_t)file_len + 1);
     if (!edited) {
         fclose(fp);
-        unlink(tmp_path);
+        unlink(temp_path);
         snprintf(status, status_size, "Out of memory");
         return -1;
     }
+    
     if (fread(edited, 1, (size_t)file_len, fp) != (size_t)file_len) {
         free(edited);
         fclose(fp);
-        unlink(tmp_path);
+        unlink(temp_path);
         snprintf(status, status_size, "Failed to read edited file");
         return -1;
     }
     fclose(fp);
-    unlink(tmp_path);
+    unlink(temp_path);
 
-    if (credential_store_import_json(&updated, edited, errbuf, sizeof(errbuf)) != 0) {
+    if (credential_store_import_yaml(&updated, edited, errbuf, sizeof(errbuf)) != 0) {
         free(edited);
-        snprintf(status, status_size, "Invalid format: %s", errbuf);
+        snprintf(status, status_size, "Invalid YAML format: %s", errbuf);
         return -1;
     }
     free(edited);

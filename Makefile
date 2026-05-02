@@ -1,6 +1,6 @@
 CC := gcc
 CFLAGS := -Wall -Wextra -std=c11
-LDFLAGS := -lncurses -lcrypto
+LDFLAGS := -lncurses -lcrypto -lyaml
 
 TARGET := src/TUI/main
 

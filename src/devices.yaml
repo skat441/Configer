@@ -1,0 +1,24 @@
+# Конфигурация сетевых устройств
+# Формат: devices.yaml
+
+devices:
+  # Cisco XRv маршрутизатор
+  - name: "Cisco-xrv1"
+    type: cisco
+    ip: "192.168.0.111"
+    username: "user"
+    password: "password"  # пустой пароль
+
+  # Juniper vMX
+  - name: "Juniper1"
+    type: juniper
+    ip: "192.168.0.112"
+    username: "root"
+    password: "Junos123"
+
+  # MikroTik RouterOS
+  - name: "MikroTik1"
+    type: mikrotik
+    ip: "192.168.0.100"
+    username: "admin"
+    password: "password"  # TODO: сменить пароль

@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <yaml.h>
 
 #define STORE_MAGIC "CFGS1"
 #define STORE_MAGIC_SIZE 5
@@ -70,110 +71,6 @@ static void secure_bzero(void *ptr, size_t len) {
     }
 }
 
-static void json_escape_append(char *dst, size_t dst_size, size_t *used, const char *src) {
-    size_t i;
-    for (i = 0; src[i] != '\0' && *used + 2 < dst_size; ++i) {
-        if (src[i] == '"' || src[i] == '\\') {
-            dst[(*used)++] = '\\';
-            dst[(*used)++] = src[i];
-        } else {
-            dst[(*used)++] = src[i];
-        }
-    }
-    dst[*used] = '\0';
-}
-
-static int serialize_store_json(const CredentialStore *store, char **out, size_t *out_len) {
-    size_t i;
-    size_t used = 0;
-    size_t cap = 32768;
-    char *buf = (char *)calloc(1, cap);
-    if (!buf) {
-        return -1;
-    }
-
-    used += (size_t)snprintf(buf + used, cap - used, "{\"devices\":[");
-    for (i = 0; i < store->count; ++i) {
-        const DeviceRecord *d = &store->devices[i];
-        char name[256] = {0};
-        char ip[256] = {0};
-        char user[256] = {0};
-        char pass[512] = {0};
-        size_t n_used = 0;
-        size_t ip_used = 0;
-        size_t u_used = 0;
-        size_t p_used = 0;
-        json_escape_append(name, sizeof(name), &n_used, d->name);
-        json_escape_append(ip, sizeof(ip), &ip_used, d->ip);
-        json_escape_append(user, sizeof(user), &u_used, d->username);
-        json_escape_append(pass, sizeof(pass), &p_used, d->password);
-        used += (size_t)snprintf(buf + used, cap - used,
-                                 "%s{\"name\":\"%s\",\"type\":\"%s\",\"ip\":\"%s\",\"username\":\"%s\",\"password\":\"%s\"}",
-                                 (i == 0) ? "" : ",",
-                                 name,
-                                 device_type_to_string(d->type),
-                                 ip,
-                                 user,
-                                 pass);
-        if (used >= cap - 64) {
-            free(buf);
-            return -1;
-        }
-    }
-    used += (size_t)snprintf(buf + used, cap - used, "]}");
-    *out = buf;
-    *out_len = used;
-    return 0;
-}
-
-static int json_extract_value(const char *start, const char *key, char *out, size_t out_size) {
-    const char *p = strstr(start, key);
-    size_t idx = 0;
-    if (!p) {
-        return -1;
-    }
-    p += strlen(key);
-    while (*p && *p != '"') {
-        if (*p == '\\' && p[1] != '\0') {
-            p++;
-        }
-        if (idx + 1 >= out_size) {
-            return -1;
-        }
-        out[idx++] = *p++;
-    }
-    out[idx] = '\0';
-    return (*p == '"') ? 0 : -1;
-}
-
-static int deserialize_store_json(CredentialStore *store, const char *json) {
-    const char *p = json;
-    store->count = 0;
-
-    while ((p = strstr(p, "{\"name\":\"")) != NULL) {
-        DeviceRecord d;
-        char type[32];
-        memset(&d, 0, sizeof(d));
-        memset(type, 0, sizeof(type));
-
-        if (json_extract_value(p, "{\"name\":\"", d.name, sizeof(d.name)) != 0 ||
-            json_extract_value(p, "\"type\":\"", type, sizeof(type)) != 0 ||
-            json_extract_value(p, "\"ip\":\"", d.ip, sizeof(d.ip)) != 0 ||
-            json_extract_value(p, "\"username\":\"", d.username, sizeof(d.username)) != 0 ||
-            json_extract_value(p, "\"password\":\"", d.password, sizeof(d.password)) != 0 ||
-            device_type_from_string(type, &d.type) != 0) {
-            return -1;
-        }
-
-        if (store->count >= STORE_MAX_DEVICES) {
-            return -1;
-        }
-        store->devices[store->count++] = d;
-        p += 9;
-    }
-    return 0;
-}
-
 static int is_valid_ipv4(const char *ip) {
     int dots = 0;
     int value = 0;
@@ -231,7 +128,7 @@ static int validate_store(const CredentialStore *store, char *error_buf, size_t 
 
     for (i = 0; i < store->count; ++i) {
         const DeviceRecord *d = &store->devices[i];
-        if (d->name[0] == '\0' || d->ip[0] == '\0' || d->username[0] == '\0' || d->password[0] == '\0') {
+        if (d->name[0] == '\0' || d->ip[0] == '\0' || d->username[0] == '\0') {
             snprintf(error_buf, error_buf_size, "device %zu has empty required fields", i + 1);
             return -1;
         }
@@ -349,6 +246,172 @@ static int decrypt_payload(const uint8_t *ciphertext,
     return 0;
 }
 
+// YAML экспорт
+int credential_store_export_yaml(const CredentialStore *store, char **out_yaml, size_t *out_len) {
+    size_t cap = 16384;
+    size_t used = 0;
+    char *buf = (char *)calloc(1, cap);
+    size_t i;
+    
+    if (!buf) {
+        return -1;
+    }
+    
+    used += (size_t)snprintf(buf + used, cap - used, "devices:\n");
+    
+    for (i = 0; i < store->count; ++i) {
+        const DeviceRecord *d = &store->devices[i];
+        used += (size_t)snprintf(buf + used, cap - used,
+                                 "  - name: \"%s\"\n"
+                                 "    type: %s\n"
+                                 "    ip: \"%s\"\n"
+                                 "    username: \"%s\"\n"
+                                 "    password: \"%s\"\n",
+                                 d->name,
+                                 device_type_to_string(d->type),
+                                 d->ip,
+                                 d->username,
+                                 d->password);
+        if (used >= cap - 512) {
+            cap *= 2;
+            char *new_buf = (char *)realloc(buf, cap);
+            if (!new_buf) {
+                free(buf);
+                return -1;
+            }
+            buf = new_buf;
+        }
+    }
+    
+    *out_yaml = buf;
+    *out_len = used;
+    return 0;
+}
+
+// YAML импорт
+int credential_store_import_yaml(CredentialStore *store, const char *yaml, char *error_buf, size_t error_buf_size) {
+    yaml_parser_t parser;
+    yaml_event_t event;
+    DeviceRecord current_device;
+    int in_devices = 0;
+    int in_device = 0;
+    int expecting_key = 0;
+    char current_key[64];
+    int done = 0;
+    int ret = 0;
+    
+    memset(store, 0, sizeof(*store));
+    memset(current_key, 0, sizeof(current_key));
+    
+    if (!error_buf || error_buf_size == 0) {
+        static char sink[8];
+        error_buf = sink;
+        error_buf_size = sizeof(sink);
+    }
+    
+    if (!yaml_parser_initialize(&parser)) {
+        snprintf(error_buf, error_buf_size, "Failed to initialize YAML parser");
+        return -1;
+    }
+    
+    yaml_parser_set_input_string(&parser, (const unsigned char *)yaml, strlen(yaml));
+    
+    while (!done) {
+        if (!yaml_parser_parse(&parser, &event)) {
+            snprintf(error_buf, error_buf_size, "YAML parse error");
+            ret = -1;
+            break;
+        }
+        
+        switch (event.type) {
+            case YAML_MAPPING_START_EVENT:
+                if (in_devices && !in_device) {
+                    in_device = 1;
+                    memset(&current_device, 0, sizeof(current_device));
+                }
+                break;
+                
+            case YAML_MAPPING_END_EVENT:
+                if (in_device) {
+                    if (current_device.name[0] != '\0' && 
+                        current_device.ip[0] != '\0' &&
+                        current_device.username[0] != '\0') {
+                        if (store->count < STORE_MAX_DEVICES) {
+                            store->devices[store->count++] = current_device;
+                        } else {
+                            snprintf(error_buf, error_buf_size, "Too many devices (max %d)", STORE_MAX_DEVICES);
+                            ret = -1;
+                        }
+                    }
+                    in_device = 0;
+                } else if (in_devices) {
+                    done = 1;
+                }
+                break;
+                
+            case YAML_SEQUENCE_START_EVENT:
+                in_devices = 1;
+                break;
+                
+            case YAML_SEQUENCE_END_EVENT:
+                in_devices = 0;
+                done = 1;
+                break;
+                
+            case YAML_SCALAR_EVENT:
+                if (!in_devices) {
+                    // Корневой ключ должен быть "devices"
+                    if (strcmp((char *)event.data.scalar.value, "devices") != 0) {
+                        snprintf(error_buf, error_buf_size, "Expected 'devices' key, got '%s'", 
+                                 (char *)event.data.scalar.value);
+                        ret = -1;
+                    }
+                } else if (in_device) {
+                    if (expecting_key) {
+                        // Это значение - сохраняем в соответствующее поле
+                        const char *value = (char *)event.data.scalar.value;
+                        if (strcmp(current_key, "name") == 0) {
+                            strncpy(current_device.name, value, sizeof(current_device.name) - 1);
+                        } else if (strcmp(current_key, "type") == 0) {
+                            if (device_type_from_string(value, &current_device.type) != 0) {
+                                snprintf(error_buf, error_buf_size, "Invalid device type: %s", value);
+                                ret = -1;
+                            }
+                        } else if (strcmp(current_key, "ip") == 0) {
+                            strncpy(current_device.ip, value, sizeof(current_device.ip) - 1);
+                        } else if (strcmp(current_key, "username") == 0) {
+                            strncpy(current_device.username, value, sizeof(current_device.username) - 1);
+                        } else if (strcmp(current_key, "password") == 0) {
+                            strncpy(current_device.password, value, sizeof(current_device.password) - 1);
+                        }
+                        expecting_key = 0;
+                        memset(current_key, 0, sizeof(current_key));
+                    } else {
+                        // Это ключ
+                        strncpy(current_key, (char *)event.data.scalar.value, sizeof(current_key) - 1);
+                        expecting_key = 1;
+                    }
+                }
+                break;
+                
+            default:
+                break;
+        }
+        
+        yaml_event_delete(&event);
+        if (ret != 0) break;
+    }
+    
+    yaml_parser_delete(&parser);
+    
+    if (ret == 0 && store->count == 0) {
+        snprintf(error_buf, error_buf_size, "No devices found in YAML");
+        return -1;
+    }
+    
+    return ret;
+}
+
 int credential_store_save(const CredentialStore *store,
                           const char *path,
                           const char *master_password) {
@@ -362,6 +425,10 @@ int credential_store_save(const CredentialStore *store,
     char temp_path[512];
     FILE *fp = NULL;
 
+    if (!store || !path || !master_password) {
+        return -1;
+    }
+
     memset(&header, 0, sizeof(header));
     memcpy(header.magic, STORE_MAGIC, STORE_MAGIC_SIZE);
     header.version = STORE_VERSION;
@@ -369,7 +436,7 @@ int credential_store_save(const CredentialStore *store,
 
     if (RAND_bytes(header.salt, STORE_SALT_SIZE) != 1 ||
         RAND_bytes(header.nonce, STORE_NONCE_SIZE) != 1 ||
-        serialize_store_json(store, &plaintext, &plaintext_len) != 0 ||
+        credential_store_export_yaml(store, &plaintext, &plaintext_len) != 0 ||
         derive_key(master_password, header.salt, STORE_PBKDF2_ITERATIONS, key) != 0 ||
         encrypt_payload((const uint8_t *)plaintext, (int)plaintext_len, key, header.nonce,
                         &ciphertext, &ciphertext_len, tag) != 0) {
@@ -422,11 +489,14 @@ int credential_store_open_or_create(CredentialStore *store,
     int plaintext_len = 0;
     uint32_t ciphertext_len;
     uint32_t iterations;
+    char error_buf[256];
 
     memset(store, 0, sizeof(*store));
     fp = fopen(path, "rb");
     if (!fp) {
         if (errno == ENOENT) {
+            // Создаем новый пустой store
+            store->count = 0;
             return credential_store_save(store, path, master_password);
         }
         return -1;
@@ -464,7 +534,8 @@ int credential_store_open_or_create(CredentialStore *store,
     }
 
     plaintext[plaintext_len] = '\0';
-    if (deserialize_store_json(store, (const char *)plaintext) != 0 ||
+    
+    if (credential_store_import_yaml(store, (const char *)plaintext, error_buf, sizeof(error_buf)) != 0 ||
         validate_store(store, NULL, 0) != 0) {
         secure_bzero(key, sizeof(key));
         free(ciphertext);
@@ -480,6 +551,7 @@ int credential_store_open_or_create(CredentialStore *store,
 }
 
 int credential_store_add(CredentialStore *store, const DeviceRecord *record) {
+    if (!store || !record) return -1;
     if (store->count >= STORE_MAX_DEVICES) {
         return -1;
     }
@@ -488,6 +560,7 @@ int credential_store_add(CredentialStore *store, const DeviceRecord *record) {
 }
 
 int credential_store_update(CredentialStore *store, size_t index, const DeviceRecord *record) {
+    if (!store || !record) return -1;
     if (index >= store->count) {
         return -1;
     }
@@ -497,6 +570,7 @@ int credential_store_update(CredentialStore *store, size_t index, const DeviceRe
 
 int credential_store_delete(CredentialStore *store, size_t index) {
     size_t i;
+    if (!store) return -1;
     if (index >= store->count) {
         return -1;
     }
@@ -504,27 +578,5 @@ int credential_store_delete(CredentialStore *store, size_t index) {
         store->devices[i] = store->devices[i + 1];
     }
     store->count--;
-    return 0;
-}
-
-int credential_store_export_json(const CredentialStore *store, char **out_json, size_t *out_len) {
-    return serialize_store_json(store, out_json, out_len);
-}
-
-int credential_store_import_json(CredentialStore *store,
-                                 const char *json,
-                                 char *error_buf,
-                                 size_t error_buf_size) {
-    CredentialStore parsed;
-    if (deserialize_store_json(&parsed, json) != 0) {
-        if (error_buf && error_buf_size > 0) {
-            snprintf(error_buf, error_buf_size, "invalid JSON structure");
-        }
-        return -1;
-    }
-    if (validate_store(&parsed, error_buf, error_buf_size) != 0) {
-        return -1;
-    }
-    *store = parsed;
     return 0;
 }
