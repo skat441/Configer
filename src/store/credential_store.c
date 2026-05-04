@@ -41,7 +41,8 @@ static uint32_t from_be32(uint32_t value) {
 
 const char *device_type_to_string(DeviceType type) {
     switch (type) {
-        case DEVICE_TYPE_CISCO: return "cisco";
+        case DEVICE_TYPE_CISCO_XRV: return "cisco-xrv";
+        case DEVICE_TYPE_CISCO_CSR: return "cisco-csr";
         case DEVICE_TYPE_MIKROTIK: return "mikrotik";
         case DEVICE_TYPE_JUNIPER: return "juniper";
         default: return "unknown";
@@ -49,8 +50,12 @@ const char *device_type_to_string(DeviceType type) {
 }
 
 int device_type_from_string(const char *value, DeviceType *out_type) {
-    if (strcmp(value, "cisco") == 0) {
-        *out_type = DEVICE_TYPE_CISCO;
+    if (strcmp(value, "cisco-xrv") == 0) {
+        *out_type = DEVICE_TYPE_CISCO_XRV;
+        return 0;
+    }
+    if (strcmp(value, "cisco-csr") == 0) {
+        *out_type = DEVICE_TYPE_CISCO_CSR;
         return 0;
     }
     if (strcmp(value, "mikrotik") == 0) {

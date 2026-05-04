@@ -10,6 +10,9 @@ typedef struct {
 int get_cisco_config(const char *host, const char *user, const char *pass);
 int put_cisco_config(const char *host, const char *user, const char *pass, const char *config_file);
 
+int get_cisco_csr_config(const char *host, const char *user, const char *pass);
+int send_cisco_csr_config(const char *host, const char *user, const char *pass, const char *config_file);
+
 int mikrotik_scp_get(const char *mikrotik_user,
                      const char *mikrotik_host,
                      const char *mikrotik_password,

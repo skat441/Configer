@@ -6,8 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <termios.h>
+#include <time.h>
 #include <unistd.h>
 #include "../network_ops.h"
 #include "../store/credential_store.h"
@@ -29,15 +31,18 @@ typedef enum {
     ITEM_NAV_MANAGE,
     ITEM_RUN_GET_DEVICE,
     ITEM_RUN_SEND_DEVICE,
+    ITEM_RUN_GET_ALL,
+    ITEM_RUN_SEND_ALL,
     ITEM_ADD_DEVICE,
     ITEM_EDIT_DEVICE,
     ITEM_DELETE_DEVICE,
     ITEM_BULK_EDIT,
+    ITEM_SHOW_HISTORY,
     ITEM_BACK
 } ItemAction;
 
 typedef struct {
-    char label[256];
+    char label[512];
     ItemAction action;
     size_t device_index;
 } MenuItem;
@@ -49,6 +54,61 @@ typedef struct {
 
 static CredentialStore g_store;
 static char g_master_password[128];
+
+static int resolve_config_path(const char *link_path, char *real_path, size_t size) {
+    ssize_t len;
+    
+    len = readlink(link_path, real_path, size - 1);
+    if (len == -1) {
+        return -1;
+    }
+    
+    real_path[len] = '\0';
+    return 0;
+}
+
+static void sanitize_device_name(char *dest, size_t size, const char *src) {
+    if (!dest || !src || size == 0) return;
+    
+    strncpy(dest, src, size - 1);
+    dest[size - 1] = '\0';
+    
+    for (char *p = dest; *p; p++) {
+        if (*p == '/' || *p == ' ' || *p == '|' || *p == ':' || 
+            *p == '*' || *p == '?' || *p == '"' || *p == '<' || 
+            *p == '>' || *p == '\\') {
+            *p = '_';
+        }
+    }
+}
+
+static int show_device_history(const DeviceRecord *device) {
+    char dir_path[512];
+    char command[2048];
+    
+    snprintf(dir_path, sizeof(dir_path), "./../../configs/%s", device->name);
+    
+    printf("\n=== Configuration history for: %s ===\n", device->name);
+    printf("Directory: %s\n\n", dir_path);
+    
+    snprintf(command, sizeof(command), 
+             "ls -lah %s/*.cfg %s/*.conf %s/*.rsc 2>/dev/null | tail -20", 
+             dir_path, dir_path, dir_path);
+    system(command);
+    
+    printf("\nPress Enter to continue...");
+    getchar();
+    
+    return 0;
+}
+
+// Создание директории, если её нет
+static void ensure_directory(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) {
+        mkdir(path, 0755);
+    }
+}
 
 static void normalize_single_line(char *text) {
     size_t i;
@@ -227,30 +287,230 @@ static int is_valid_ip(const char *ip) {
     return dots == 3;
 }
 
+
+// Обновленный execute_device_action
+// Обновленный execute_device_action
 static int execute_device_action(void *ctx_ptr) {
     DeviceActionContext *ctx = (DeviceActionContext *)ctx_ptr;
     const DeviceRecord *d = ctx->device;
-
+    char config_path[1024];
+    char safe_name[256];
+    char real_path[1024];
+    int result;
+    
+    // Очищаем имя устройства для использования в пути
+    sanitize_device_name(safe_name, sizeof(safe_name), d->name);
+    
     if (!ctx->is_send) {
+        // GET операция - получаем конфигурацию с устройства
         switch (d->type) {
-            case DEVICE_TYPE_CISCO:
-                return get_cisco_config(d->ip, d->username, d->password);
-            case DEVICE_TYPE_MIKROTIK:
-                return mikrotik_scp_get(d->username, d->ip, d->password, "", "./");
+            // ... GET код остается без изменений ...
             case DEVICE_TYPE_JUNIPER:
-                return juniper_vmx_backup_get(d->username, d->ip, d->password, "./vmx-backup.conf");
+                {
+                    char timestamp[32];
+                    time_t now = time(NULL);
+                    struct tm *t = localtime(&now);
+                    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+                    
+                    snprintf(config_path, sizeof(config_path), "./../../configs/%s/%s_%s.conf", 
+                             safe_name, safe_name, timestamp);
+                    
+                    char dir_path[512];
+                    snprintf(dir_path, sizeof(dir_path), "./../../configs/%s", safe_name);
+                    ensure_directory(dir_path);
+                    
+                    result = juniper_vmx_backup_get(d->username, d->ip, d->password, config_path);
+                    
+                    if (result == 0) {
+                        char latest_path[512];
+                        snprintf(latest_path, sizeof(latest_path), "./../../configs/%s/latest.conf", safe_name);
+                        unlink(latest_path);
+                        symlink(config_path, latest_path);
+                    }
+                }
+                break;
+            case DEVICE_TYPE_CISCO_XRV:
+                result = get_cisco_config(d->ip, d->username, d->password);
+                if (result == 0) {
+                    // Генерируем путь с временной меткой
+                    char timestamp[32];
+                    time_t now = time(NULL);
+                    struct tm *t = localtime(&now);
+                    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+                    
+                    snprintf(config_path, sizeof(config_path), "./../../configs/%s/%s_%s.cfg", 
+                             safe_name, safe_name, timestamp);
+                    
+                    // Создаем директорию если её нет
+                    char dir_path[512];
+                    snprintf(dir_path, sizeof(dir_path), "./../../configs/%s", safe_name);
+                    ensure_directory(dir_path);
+                    
+                    // Перемещаем файл
+                    char cmd[1060];
+                    snprintf(cmd, sizeof(cmd), "mv cisco.cfg \"%s\" 2>/dev/null", config_path);
+                    system(cmd);
+                    
+                    // Обновляем symlink на последнюю версию
+                    char latest_path[512];
+                    snprintf(latest_path, sizeof(latest_path), "./../../configs/%s/latest.cfg", safe_name);
+                    unlink(latest_path);
+                    symlink(config_path, latest_path);
+                }
+                break;
+                
+            case DEVICE_TYPE_CISCO_CSR:
+                result = get_cisco_csr_config(d->ip, d->username, d->password);
+                if (result == 0) {
+                    char timestamp[32];
+                    time_t now = time(NULL);
+                    struct tm *t = localtime(&now);
+                    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+                    
+                    snprintf(config_path, sizeof(config_path), "./../../configs/%s/%s_%s.cfg", 
+                             safe_name, safe_name, timestamp);
+                    
+                    char dir_path[512];
+                    snprintf(dir_path, sizeof(dir_path), "./../../configs/%s", safe_name);
+                    ensure_directory(dir_path);
+                    
+                    char cmd[1060];
+                    snprintf(cmd, sizeof(cmd), "mv cisco.cfg \"%s\" 2>/dev/null", config_path);
+                    system(cmd);
+                    
+                    char latest_path[512];
+                    snprintf(latest_path, sizeof(latest_path), "./../../configs/%s/latest.cfg", safe_name);
+                    unlink(latest_path);
+                    symlink(config_path, latest_path);
+                }
+                break;
+                
+            case DEVICE_TYPE_MIKROTIK:
+                {
+                    // Генерируем путь с временной меткой
+                    char timestamp[32];
+                    time_t now = time(NULL);
+                    struct tm *t = localtime(&now);
+                    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+                    
+                    snprintf(config_path, sizeof(config_path), "./../../configs/%s/%s_%s.rsc", 
+                             safe_name, safe_name, timestamp);
+                    
+                    // Создаем директорию
+                    char dir_path[512];
+                    snprintf(dir_path, sizeof(dir_path), "./../../configs/%s", safe_name);
+                    ensure_directory(dir_path);
+                    
+                    // Получаем конфигурацию
+                    result = mikrotik_scp_get(d->username, d->ip, d->password, "", config_path);
+                    
+                    if (result == 0) {
+                        // Обновляем symlink
+                        char latest_path[512];
+                        snprintf(latest_path, sizeof(latest_path), "./../../configs/%s/latest.rsc", safe_name);
+                        unlink(latest_path);
+                        symlink(config_path, latest_path);
+                    }
+                }
+                break;
             default:
                 return 1;
         }
+        return result;
     }
 
+    // SEND операции - берем последний конфиг из директории устройства
+    char link_path[512];
+    char find_cmd[1024];
+    FILE *fp;
+
+    
     switch (d->type) {
-        case DEVICE_TYPE_CISCO:
-            return put_cisco_config(d->ip, d->username, d->password, "cisco.cfg");
+        case DEVICE_TYPE_CISCO_XRV:
+            snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.cfg", safe_name);
+            
+            // Проверяем существование symlink или файла
+            if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                // Пробуем найти любой .cfg файл в директории
+                snprintf(find_cmd, sizeof(find_cmd), 
+                         "ls -t ./../../configs/%s/*.cfg 2>/dev/null | head -1", safe_name);
+                fp = popen(find_cmd, "r");
+                if (fp && fgets(real_path, sizeof(real_path), fp)) {
+                    real_path[strcspn(real_path, "\n")] = '\0';
+                    pclose(fp);
+                } else {
+                    if (fp) pclose(fp);
+                    fprintf(stderr, "Error: No config file found for device %s\n", d->name);
+                    return 1;
+                }
+            }
+            return put_cisco_config(d->ip, d->username, d->password, real_path);
+        case DEVICE_TYPE_CISCO_CSR:
+            snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.cfg", safe_name);
+            
+            // Проверяем существование symlink или файла
+            if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                // Пробуем найти любой .cfg файл в директории
+                snprintf(find_cmd, sizeof(find_cmd), 
+                         "ls -t ./../../configs/%s/*.cfg 2>/dev/null | head -1", safe_name);
+                fp = popen(find_cmd, "r");
+                if (fp && fgets(real_path, sizeof(real_path), fp)) {
+                    real_path[strcspn(real_path, "\n")] = '\0';
+                    pclose(fp);
+                } else {
+                    if (fp) pclose(fp);
+                    fprintf(stderr, "Error: No config file found for device %s\n", d->name);
+                    return 1;
+                }
+            }
+            return send_cisco_csr_config(d->ip, d->username, d->password, real_path);
+            
         case DEVICE_TYPE_MIKROTIK:
-            return mikrotik_scp_send(d->username, d->ip, d->password, "./test2.rsc", "test2.rsc");
+            snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.rsc", safe_name);
+            
+            if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                // Пробуем найти любой .rsc файл
+                snprintf(find_cmd, sizeof(find_cmd), 
+                         "ls -t ./../../configs/%s/*.rsc 2>/dev/null | head -1", safe_name);
+                fp = popen(find_cmd, "r");
+                if (fp && fgets(real_path, sizeof(real_path), fp)) {
+                    real_path[strcspn(real_path, "\n")] = '\0';
+                    pclose(fp);
+                } else {
+                    if (fp) pclose(fp);
+                    fprintf(stderr, "Error: No config file found for device %s\n", d->name);
+                    return 1;
+                }
+            } else {
+            }
+            return mikrotik_scp_send(d->username, d->ip, d->password, real_path, "config.rsc");
+            
         case DEVICE_TYPE_JUNIPER:
-            return juniper_vmx_backup_send(d->username, d->ip, d->password, "./vmx-backup.conf");
+            // Сначала пробуем latest.conf
+            snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.conf", safe_name);
+            
+            if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                // Пробуем latest.cfg как fallback
+                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.cfg", safe_name);
+                
+                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                    // Пробуем найти любой .conf или .cfg файл
+                    snprintf(find_cmd, sizeof(find_cmd), 
+                             "ls -t ./../../configs/%s/*.conf ./../../configs/%s/*.cfg 2>/dev/null | head -1", 
+                             safe_name, safe_name);
+                    fp = popen(find_cmd, "r");
+                    if (fp && fgets(real_path, sizeof(real_path), fp)) {
+                        real_path[strcspn(real_path, "\n")] = '\0';
+                        pclose(fp);
+                    } else {
+                        if (fp) pclose(fp);
+                        fprintf(stderr, "Error: No config file found for device %s\n", d->name);
+                        return 1;
+                    }
+                }
+            }
+            return juniper_vmx_backup_send(d->username, d->ip, d->password, real_path);
+            
         default:
             return 1;
     }
@@ -259,6 +519,7 @@ static int execute_device_action(void *ctx_ptr) {
 static size_t build_menu(ScreenState screen, MenuItem *items, size_t capacity) {
     size_t count = 0;
     size_t i;
+    
     if (screen == SCREEN_TOP_LEVEL) {
         snprintf(items[count].label, sizeof(items[count].label), "GET operations");
         items[count++].action = ITEM_NAV_GET;
@@ -269,7 +530,18 @@ static size_t build_menu(ScreenState screen, MenuItem *items, size_t capacity) {
         return count;
     }
 
-    if (screen == SCREEN_GET_MENU || screen == SCREEN_SEND_MENU) {
+    if (screen == SCREEN_GET_MENU) {
+        // Добавляем "Get all devices" пункт
+        snprintf(items[count].label, sizeof(items[count].label), ">>> GET ALL DEVICES <<<");
+        items[count].device_index = 0;
+        items[count++].action = ITEM_RUN_GET_ALL;
+        
+        // Разделитель (визуальный)
+        snprintf(items[count].label, sizeof(items[count].label), "---------------------");
+        items[count].device_index = 0;
+        items[count++].action = ITEM_BACK;  // Неактивный пункт, просто разделитель
+        
+        // Список отдельных устройств
         for (i = 0; i < g_store.count && count + 1 < capacity; ++i) {
             snprintf(items[count].label,
                      sizeof(items[count].label),
@@ -279,8 +551,38 @@ static size_t build_menu(ScreenState screen, MenuItem *items, size_t capacity) {
                      g_store.devices[i].username,
                      g_store.devices[i].ip);
             items[count].device_index = i;
-            items[count++].action = (screen == SCREEN_GET_MENU) ? ITEM_RUN_GET_DEVICE : ITEM_RUN_SEND_DEVICE;
+            items[count++].action = ITEM_RUN_GET_DEVICE;
         }
+        
+        snprintf(items[count].label, sizeof(items[count].label), "<- Back");
+        items[count++].action = ITEM_BACK;
+        return count;
+    }
+    
+    if (screen == SCREEN_SEND_MENU) {
+        // Добавляем "Send all devices" пункт
+        snprintf(items[count].label, sizeof(items[count].label), ">>> SEND ALL DEVICES <<<");
+        items[count].device_index = 0;
+        items[count++].action = ITEM_RUN_SEND_ALL;
+        
+        // Разделитель
+        snprintf(items[count].label, sizeof(items[count].label), "---------------------");
+        items[count].device_index = 0;
+        items[count++].action = ITEM_BACK;
+        
+        // Список отдельных устройств
+        for (i = 0; i < g_store.count && count + 1 < capacity; ++i) {
+            snprintf(items[count].label,
+                     sizeof(items[count].label),
+                     "%s | %s | %s@%s",
+                     g_store.devices[i].name,
+                     device_type_to_string(g_store.devices[i].type),
+                     g_store.devices[i].username,
+                     g_store.devices[i].ip);
+            items[count].device_index = i;
+            items[count++].action = ITEM_RUN_SEND_DEVICE;
+        }
+        
         snprintf(items[count].label, sizeof(items[count].label), "<- Back");
         items[count++].action = ITEM_BACK;
         return count;
@@ -295,6 +597,8 @@ static size_t build_menu(ScreenState screen, MenuItem *items, size_t capacity) {
         items[count++].action = ITEM_DELETE_DEVICE;
         snprintf(items[count].label, sizeof(items[count].label), "Bulk edit in editor (YAML)");
         items[count++].action = ITEM_BULK_EDIT;
+        snprintf(items[count].label, sizeof(items[count].label), "Show device history");
+        items[count++].action = ITEM_SHOW_HISTORY;
         snprintf(items[count].label, sizeof(items[count].label), "<- Back");
         items[count++].action = ITEM_BACK;
     }
@@ -325,7 +629,7 @@ static int manage_add_device(void) {
 
     print_devices_list();
     if (prompt_line("Name: ", d.name, sizeof(d.name)) != 0 ||
-        prompt_line("Type (cisco|mikrotik|juniper): ", type_buf, sizeof(type_buf)) != 0 ||
+        prompt_line("Type (cisco-xrv|cisco-csr|mikrotik|juniper): ", type_buf, sizeof(type_buf)) != 0 ||
         device_type_from_string(type_buf, &d.type) != 0 ||
         prompt_line("IP: ", d.ip, sizeof(d.ip)) != 0 ||
         !is_valid_ip(d.ip) ||
@@ -463,7 +767,7 @@ static int manage_bulk_edit_devices(char *status, size_t status_size) {
     fprintf(fp, "# Format:\n");
     fprintf(fp, "# devices:\n");
     fprintf(fp, "#   - name: \"device-name\"\n");
-    fprintf(fp, "#     type: cisco|mikrotik|juniper\n");
+    fprintf(fp, "#     type: cisco-xrv|cisco-csr|mikrotik|juniper\n");
     fprintf(fp, "#     ip: \"192.168.1.1\"\n");
     fprintf(fp, "#     username: \"user\"\n");
     fprintf(fp, "#     password: \"pass\"\n");
@@ -541,6 +845,210 @@ static int prompt_yes_no(const char *prompt) {
         return 0;
     }
     return buf[0] == 'y' || buf[0] == 'Y';
+}
+
+static int execute_get_all(void) {
+    size_t i;
+    int overall_result = 0;
+    int failed_count = 0;
+    char config_dir[512];
+    char dest_path[1024];
+    char latest_path[1024];
+    char timestamp[32];
+    char safe_name[256];
+    time_t now;
+    struct tm *t;
+    
+    ensure_directory("./../../configs");
+    
+    printf("\n=== Getting configuration from ALL devices ===\n");
+    printf("Total devices: %zu\n\n", g_store.count);
+    printf("Configs will be saved to: ./../../configs/<device_name>/\n\n");
+    
+    for (i = 0; i < g_store.count; ++i) {
+        DeviceRecord *d = &g_store.devices[i];
+        int result = 0;
+        
+        // Очищаем имя устройства
+        sanitize_device_name(safe_name, sizeof(safe_name), d->name);
+        
+        // Создаем директорию для устройства
+        snprintf(config_dir, sizeof(config_dir), "./../../configs/%s", safe_name);
+        ensure_directory(config_dir);
+        
+        printf("[%zu/%zu] Getting config from: %s (%s@%s) ... ",
+               i + 1, g_store.count, d->name, d->username, d->ip);
+        fflush(stdout);
+        
+        // Сохраняем с временной меткой
+        now = time(NULL);
+        t = localtime(&now);
+        strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+        
+        switch (d->type) {
+            case DEVICE_TYPE_CISCO_XRV:
+                result = get_cisco_config(d->ip, d->username, d->password);
+                if (result == 0) {
+                    snprintf(dest_path, sizeof(dest_path), "%s/%s_%s.cfg", config_dir, safe_name, timestamp);
+                    rename("cisco.cfg", dest_path);
+                    snprintf(latest_path, sizeof(latest_path), "%s/latest.cfg", config_dir);
+                    unlink(latest_path);
+                    symlink(dest_path, latest_path);
+                }
+                break;
+                
+            case DEVICE_TYPE_CISCO_CSR:
+                result = get_cisco_csr_config(d->ip, d->username, d->password);
+                if (result == 0) {
+                    snprintf(dest_path, sizeof(dest_path), "%s/%s_%s.cfg", config_dir, safe_name, timestamp);
+                    rename("cisco.cfg", dest_path);
+                    snprintf(latest_path, sizeof(latest_path), "%s/latest.cfg", config_dir);
+                    unlink(latest_path);
+                    symlink(dest_path, latest_path);
+                }
+                break;
+                
+            case DEVICE_TYPE_MIKROTIK:
+                {
+                    // Для MikroTik используем отдельную функцию
+                    snprintf(dest_path, sizeof(dest_path), "%s/%s_%s.rsc", config_dir, safe_name, timestamp);
+                    
+                    // Вызываем функцию получения конфигурации с правильным путем
+                    result = mikrotik_scp_get(d->username, d->ip, d->password, "", dest_path);
+                    
+                    if (result == 0) {
+                        snprintf(latest_path, sizeof(latest_path), "%s/latest.rsc", config_dir);
+                        unlink(latest_path);
+                        if (symlink(dest_path, latest_path) != 0) {
+                            // Если symlink не создался, пробуем создать заново
+                            unlink(latest_path);
+                            if (symlink(dest_path, latest_path) != 0) {
+                                printf("Warning: Could not create symlink\n");
+                            }
+                        }
+                    }
+                }
+                break;
+                
+            case DEVICE_TYPE_JUNIPER:
+                {
+                    snprintf(dest_path, sizeof(dest_path), "%s/%s_%s.conf", config_dir, safe_name, timestamp);
+                    result = juniper_vmx_backup_get(d->username, d->ip, d->password, dest_path);
+                    if (result == 0) {
+                        snprintf(latest_path, sizeof(latest_path), "%s/latest.conf", config_dir);
+                        unlink(latest_path);
+                        symlink(dest_path, latest_path);
+                    }
+                }
+                break;
+                
+            default:
+                result = 1;
+                break;
+        }
+        
+        if (result == 0) {
+            printf("✓ OK -> %s\n", config_dir);
+        } else {
+            printf("✗ FAILED\n");
+            overall_result = -1;
+            failed_count++;
+        }
+    }
+    
+    printf("\n=== Summary ===\n");
+    printf("Successful: %zu\n", g_store.count - failed_count);
+    printf("Failed: %d\n", failed_count);
+    printf("\nConfigs stored in: ./../../configs/<device_name>/\n");
+    printf("Latest config link: ./../../configs/<device_name>/latest.*\n");
+    
+    return overall_result;
+}
+
+static int execute_send_all(void) {
+    size_t i;
+    int overall_result = 0;
+    int failed_count = 0;
+    char safe_name[256];
+    char link_path[512];
+    char real_path[1024];
+    
+    printf("\n=== Sending configuration to ALL devices ===\n");
+    printf("Total devices: %zu\n\n", g_store.count);
+    
+    for (i = 0; i < g_store.count; ++i) {
+        DeviceRecord *d = &g_store.devices[i];
+        int result;
+        
+        sanitize_device_name(safe_name, sizeof(safe_name), d->name);
+        
+        printf("[%zu/%zu] Sending config to: %s (%s@%s) ... ",
+               i + 1, g_store.count, d->name, d->username, d->ip);
+        fflush(stdout);
+        
+        switch (d->type) {
+            case DEVICE_TYPE_CISCO_XRV:
+                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.cfg", safe_name);
+                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                    printf("✗ FAILED (no config found)\n");
+                    failed_count++;
+                    overall_result = -1;
+                    continue;
+                }
+                result = put_cisco_config(d->ip, d->username, d->password, real_path);
+                break;
+            case DEVICE_TYPE_CISCO_CSR:
+                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.cfg", safe_name);
+                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                    printf("✗ FAILED (no config found)\n");
+                    failed_count++;
+                    overall_result = -1;
+                    continue;
+                }
+                result = send_cisco_csr_config(d->ip, d->username, d->password, real_path);
+                break;
+                
+            case DEVICE_TYPE_MIKROTIK:
+                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.rsc", safe_name);
+                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                    printf("✗ FAILED (no config found)\n");
+                    failed_count++;
+                    overall_result = -1;
+                    continue;
+                }
+                result = mikrotik_scp_send(d->username, d->ip, d->password, real_path, "config.rsc");
+                break;
+                
+            case DEVICE_TYPE_JUNIPER:
+                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.conf", safe_name);
+                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                    printf("✗ FAILED (no config found)\n");
+                    failed_count++;
+                    overall_result = -1;
+                    continue;
+                }
+                result = juniper_vmx_backup_send(d->username, d->ip, d->password, real_path);
+                break;
+                
+            default:
+                result = 1;
+                break;
+        }
+        
+        if (result == 0) {
+            printf("✓ OK\n");
+        } else {
+            printf("✗ FAILED\n");
+            overall_result = -1;
+            failed_count++;
+        }
+    }
+    
+    printf("\n=== Summary ===\n");
+    printf("Successful: %zu\n", g_store.count - failed_count);
+    printf("Failed: %d\n", failed_count);
+    
+    return overall_result;
 }
 
 int main(void) {
@@ -655,6 +1163,45 @@ int main(void) {
         }
 
         switch (items[selected].action) {
+            case ITEM_SHOW_HISTORY:
+                if (g_store.count == 0) {
+                    snprintf(status, sizeof(status), "No devices to show history");
+                    break;
+                }
+                // Показываем список устройств и выбираем
+                endwin();
+                print_devices_list();
+                printf("\nEnter device index to show history: ");
+                char input[32];
+                if (prompt_line("", input, sizeof(input)) == 0) {
+                    size_t idx = strtoul(input, NULL, 10);
+                    if (idx > 0 && idx <= g_store.count) {
+                        show_device_history(&g_store.devices[idx - 1]);
+                    }
+                }
+                initscr();
+                restore_curses_input_state();
+                snprintf(status, sizeof(status), "History viewer closed");
+                break;
+            case ITEM_RUN_GET_ALL:
+                endwin();
+                execute_get_all();
+                printf("\nPress Enter to continue...");
+                getchar();
+                initscr();
+                restore_curses_input_state();
+                snprintf(status, sizeof(status), "Get all devices completed");
+                break;
+                
+            case ITEM_RUN_SEND_ALL:
+                endwin();
+                execute_send_all();
+                printf("\nPress Enter to continue...");
+                getchar();
+                initscr();
+                restore_curses_input_state();
+                snprintf(status, sizeof(status), "Send all devices completed");
+                break;
             case ITEM_NAV_GET:
                 screen = SCREEN_GET_MENU;
                 item_count = build_menu(screen, items, MENU_MAX_ITEMS);
