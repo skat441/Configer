@@ -35,6 +35,7 @@
 *.i*86
 *.x86_64
 *.hex
+./src/TUI/configer
 
 # Debug files
 *.dSYM/
@@ -58,6 +59,7 @@ dkms.conf
 *.cfg
 *.rsc
 *.conf
+*.config
 
 #devices database
 devices.store.enc

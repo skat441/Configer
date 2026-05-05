@@ -104,7 +104,7 @@ int mikrotik_scp_get(const char *mikrotik_user,
             printf("Successfully copied to: %s\n", local_path);
             
             // Необязательно: удаляем временный файл на MikroTik
-            char remove_cmd[512];
+            char remove_cmd[800];
             snprintf(remove_cmd, sizeof(remove_cmd), 
                      "sshpass -p '%s' ssh -o StrictHostKeyChecking=no %s \"rm %s\" 2>/dev/null",
                      mikrotik_password, host_spec, export_file);

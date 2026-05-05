@@ -2,10 +2,12 @@ CC := gcc
 CFLAGS := -Wall -Wextra -std=c11
 LDFLAGS := -lncurses -lcrypto -lyaml
 
-TARGET := src/TUI/main
+TARGET := src/TUI/configer
 
 SRCS := \
 	src/TUI/main.c \
+	src/Eltex\ ME/Eltex_ME_scp_get.c \
+	src/Eltex\ ME/Eltex_ME_scp_send.c \
 	src/Cisco\ xRV/Cisco_telnet_get.c \
 	src/Cisco\ xRV/Cisco_telnet_send.c \
 	src/Cisco\ CSR/Cisco_ssh_get.c \

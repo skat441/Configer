@@ -22,3 +22,10 @@ devices:
     ip: "192.168.0.100"
     username: "admin"
     password: "password"  # TODO: сменить пароль
+
+  # Eltex ME5100
+  - name: "L1-AR2"
+    type: eltex-me
+    ip: "192.168.192.106"
+    username: "admin"
+    password: "password"  # TODO: сменить пароль

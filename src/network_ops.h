@@ -35,4 +35,21 @@ int juniper_vmx_backup_send(const char *juniper_user,
                             const char *juniper_password,
                             const char *local_path);
 
+int eltex_me_scp_get(const char *hostname,
+                     const char *user,
+                     const char *ip,
+                     const char *pass,
+                     const char *local_user,
+                     const char *local_ip,
+                     const char *local_pass,
+                     const char *config_path);
+
+int eltex_me_scp_send(const char *user,
+                      const char *ip,
+                      const char *pass,
+                      const char *local_user,
+                      const char *local_ip,
+                      const char *local_pass,
+                      const char *config_path);
+
 #endif

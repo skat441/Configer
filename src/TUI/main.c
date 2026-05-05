@@ -84,7 +84,7 @@ static void sanitize_device_name(char *dest, size_t size, const char *src) {
 
 static int show_device_history(const DeviceRecord *device) {
     char dir_path[512];
-    char command[2048];
+    char command[2400];
     
     snprintf(dir_path, sizeof(dir_path), "./../../configs/%s", device->name);
     
@@ -92,8 +92,8 @@ static int show_device_history(const DeviceRecord *device) {
     printf("Directory: %s\n\n", dir_path);
     
     snprintf(command, sizeof(command), 
-             "ls -lah %s/*.cfg %s/*.conf %s/*.rsc 2>/dev/null | tail -20", 
-             dir_path, dir_path, dir_path);
+             "ls -lah %s/*.cfg %s/*.conf %s/*.rsc %s/*.config 2>/dev/null | tail -20", 
+             dir_path, dir_path, dir_path, dir_path);
     system(command);
     
     printf("\nPress Enter to continue...");
@@ -304,7 +304,31 @@ static int execute_device_action(void *ctx_ptr) {
     if (!ctx->is_send) {
         // GET операция - получаем конфигурацию с устройства
         switch (d->type) {
-            // ... GET код остается без изменений ...
+            case DEVICE_TYPE_ELTEX_ME:
+                {
+                    char timestamp[32];
+                    time_t now = time(NULL);
+                    struct tm *t = localtime(&now);
+                    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+                    
+                    snprintf(config_path, sizeof(config_path), "./../../configs/%s/%s_%s.config", 
+                             safe_name, safe_name, timestamp);
+                    
+                    char dir_path[512];
+                    snprintf(dir_path, sizeof(dir_path), "./../../configs/%s", safe_name);
+                    ensure_directory(dir_path);
+                    //TO_DO:
+                    //Получить пароль и ip от текущего пользователя для выполнения scp команды, если этого пароля и ip ещё нету
+                    result = eltex_me_scp_get(safe_name, d->username, d->ip, d->password, getlogin(), "192.168.192.53", "0512", config_path);
+                    
+                    if (result == 0) {
+                        char latest_path[512];
+                        snprintf(latest_path, sizeof(latest_path), "./../../configs/%s/latest.config", safe_name);
+                        unlink(latest_path);
+                        symlink(config_path, latest_path);
+                    }
+                }
+                break;
             case DEVICE_TYPE_JUNIPER:
                 {
                     char timestamp[32];
@@ -424,8 +448,42 @@ static int execute_device_action(void *ctx_ptr) {
     char find_cmd[1024];
     FILE *fp;
 
-    
+
     switch (d->type) {
+        case DEVICE_TYPE_ELTEX_ME:
+            snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.config", safe_name);
+
+            // Проверяем существование symlink или файла
+            if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
+                // Пробуем найти любой .config файл в директории
+                snprintf(find_cmd, sizeof(find_cmd), 
+                         "ls -t ./../../configs/%s/*.config 2>/dev/null | head -1", safe_name);
+                fp = popen(find_cmd, "r");
+                if (fp && fgets(real_path, sizeof(real_path), fp)) {
+                    real_path[strcspn(real_path, "\n")] = '\0';
+                    pclose(fp);
+                } else {
+                    if (fp) pclose(fp);
+                    fprintf(stderr, "Error: No config file found for device %s\n", d->name);
+                    return 1;
+                }
+            }
+            char cp_cmd[2048];
+            char rm_cmd[2048];
+            snprintf(cp_cmd, sizeof(cp_cmd), "cp %s ~/", real_path);
+            system(cp_cmd);
+
+            char config_name[1024];
+            char buffer[256];
+            sscanf(real_path, "./../../configs/%[^/]/%s", buffer, config_name);
+
+
+            int result = eltex_me_scp_send(d->username, d->ip, d->password, getlogin(), "192.168.192.53", "0512", config_name);
+
+            snprintf(rm_cmd, sizeof(rm_cmd), "rm ~/%s*.config", safe_name);
+            system(rm_cmd);
+
+            return result;
         case DEVICE_TYPE_CISCO_XRV:
             snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.cfg", safe_name);
             
@@ -464,7 +522,6 @@ static int execute_device_action(void *ctx_ptr) {
                 }
             }
             return send_cisco_csr_config(d->ip, d->username, d->password, real_path);
-            
         case DEVICE_TYPE_MIKROTIK:
             snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.rsc", safe_name);
             
@@ -484,7 +541,6 @@ static int execute_device_action(void *ctx_ptr) {
             } else {
             }
             return mikrotik_scp_send(d->username, d->ip, d->password, real_path, "config.rsc");
-            
         case DEVICE_TYPE_JUNIPER:
             // Сначала пробуем latest.conf
             snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.conf", safe_name);
@@ -510,7 +566,6 @@ static int execute_device_action(void *ctx_ptr) {
                 }
             }
             return juniper_vmx_backup_send(d->username, d->ip, d->password, real_path);
-            
         default:
             return 1;
     }
