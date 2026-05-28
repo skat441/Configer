@@ -13,8 +13,10 @@ int put_cisco_config(const char *host, const char *user, const char *pass, const
     char command[1024];
     int result;
     char line[1024];
+    char error_log[] = "/tmp/cisco_put_error_XXXXXX";
+    struct stat st;
     FILE *config_fp;
-    
+
     // Проверяем файл конфигурации
     config_fp = fopen(config_file, "r");
     if (!config_fp) {
@@ -44,7 +46,21 @@ int put_cisco_config(const char *host, const char *user, const char *pass, const
     fprintf(fp, "log_user 0\n\n");
     fprintf(fp, "spawn telnet %s\n", host);
     fprintf(fp, "\n");
-    fprintf(fp, "expect \"Username:\"\n");
+    fprintf(fp, "expect {\n");
+    fprintf(fp, "    \"Connection refused\" {\n");
+    fprintf(fp, "        puts \"Error: Connection refused by %s\"\n", host);
+    fprintf(fp, "        exit 1\n");
+    fprintf(fp, "    }\n");
+    fprintf(fp, "    \"No route to host\" {\n");
+    fprintf(fp, "        puts \"Error: No route to host %s\"\n", host);
+    fprintf(fp, "        exit 1\n");
+    fprintf(fp, "    }\n");
+    fprintf(fp, "    timeout {\n");
+    fprintf(fp, "        puts \"Error: Telnet connection timeout to %s\"\n", host);
+    fprintf(fp, "        exit 1\n");
+    fprintf(fp, "    }\n");
+    fprintf(fp, "    \"Username:\"\n");
+    fprintf(fp, "}\n");
     fprintf(fp, "send \"%s\\r\"\n", user);
     fprintf(fp, "\n");
     fprintf(fp, "expect \"Password:\"\n");
@@ -100,21 +116,45 @@ int put_cisco_config(const char *host, const char *user, const char *pass, const
     
     // Делаем скрипт исполняемым
     chmod(script_path, 0755);
-    
-    printf("[+] Applying configuration...\n");
+
+    int error_fd = mkstemp(error_log);
+    if (error_fd != -1) {
+        close(error_fd);
+    }
     
     // Запускаем expect скрипт и сохраняем вывод
-    snprintf(command, sizeof(command), "%s > /dev/null", script_path);
+    snprintf(command, sizeof(command), "%s > %s 2>&1", script_path, error_log);
     result = system(command);
     
-    // Удаляем временный файл
+    if (result == -1) {
+        fprintf(stderr, "Error: Failed to execute Expect script\n");
+        unlink(script_path);
+        unlink(error_log);
+        return -1;
+    }
+
+    if (stat(error_log, &st) == 0 && st.st_size > 0) {
+        FILE *log_fp = fopen(error_log, "r");
+        if (log_fp) {
+            char log_line[256];
+            while (fgets(log_line, sizeof(log_line), log_fp)) {
+                if (strstr(log_line, "Error:")) {
+                    fprintf(stderr, "%s", log_line);
+                    result = -1;
+                }
+            }
+            fclose(log_fp);
+        }
+    }
+
+    // Удаляем временные файлы
     unlink(script_path);
+    unlink(error_log);
     
     if (result == 0) {
-        printf("[+] Success! Configuration applied to %s\n", host);
+        fprintf(stderr, "[+] Success! Configuration applied to %s\n", host);
         return 0;
     } else {
-        printf("[-] Failed to apply configuration\n");
         return -1;
     }
 }

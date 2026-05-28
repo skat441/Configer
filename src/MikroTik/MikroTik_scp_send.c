@@ -26,8 +26,6 @@ int mikrotik_scp_send(const char *mikrotik_user,
     // Генерируем временное имя для импорта
     snprintf(temp_name, sizeof(temp_name), "config_%ld", time(NULL));
     snprintf(import_command, sizeof(import_command), "/import %s", remote_path);
-
-    printf("Sending configuration to MikroTik device %s...\n", mikrotik_host);
     
     // Копируем файл на устройство через SCP
     pid = fork();

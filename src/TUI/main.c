@@ -904,109 +904,32 @@ static int prompt_yes_no(const char *prompt) {
 
 static int execute_get_all(void) {
     size_t i;
-    int overall_result = 0;
     int failed_count = 0;
-    char config_dir[512];
-    char dest_path[1024];
-    char latest_path[1024];
-    char timestamp[32];
-    char safe_name[256];
-    time_t now;
-    struct tm *t;
-    
-    ensure_directory("./../../configs");
+    DeviceActionContext ctx;
     
     printf("\n=== Getting configuration from ALL devices ===\n");
     printf("Total devices: %zu\n\n", g_store.count);
     printf("Configs will be saved to: ./../../configs/<device_name>/\n\n");
     
     for (i = 0; i < g_store.count; ++i) {
-        DeviceRecord *d = &g_store.devices[i];
-        int result = 0;
-        
-        // Очищаем имя устройства
-        sanitize_device_name(safe_name, sizeof(safe_name), d->name);
-        
-        // Создаем директорию для устройства
-        snprintf(config_dir, sizeof(config_dir), "./../../configs/%s", safe_name);
-        ensure_directory(config_dir);
-        
         printf("[%zu/%zu] Getting config from: %s (%s@%s) ... ",
-               i + 1, g_store.count, d->name, d->username, d->ip);
+               i + 1, g_store.count, 
+               g_store.devices[i].name,
+               g_store.devices[i].username, 
+               g_store.devices[i].ip);
         fflush(stdout);
         
-        // Сохраняем с временной меткой
-        now = time(NULL);
-        t = localtime(&now);
-        strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+        // Используем execute_device_action для GET операции
+        ctx.device = &g_store.devices[i];
+        ctx.is_send = 0;  // 0 = GET операция
         
-        switch (d->type) {
-            case DEVICE_TYPE_CISCO_XRV:
-                result = get_cisco_config(d->ip, d->username, d->password);
-                if (result == 0) {
-                    snprintf(dest_path, sizeof(dest_path), "%s/%s_%s.cfg", config_dir, safe_name, timestamp);
-                    rename("cisco.cfg", dest_path);
-                    snprintf(latest_path, sizeof(latest_path), "%s/latest.cfg", config_dir);
-                    unlink(latest_path);
-                    symlink(dest_path, latest_path);
-                }
-                break;
-                
-            case DEVICE_TYPE_CISCO_CSR:
-                result = get_cisco_csr_config(d->ip, d->username, d->password);
-                if (result == 0) {
-                    snprintf(dest_path, sizeof(dest_path), "%s/%s_%s.cfg", config_dir, safe_name, timestamp);
-                    rename("cisco.cfg", dest_path);
-                    snprintf(latest_path, sizeof(latest_path), "%s/latest.cfg", config_dir);
-                    unlink(latest_path);
-                    symlink(dest_path, latest_path);
-                }
-                break;
-                
-            case DEVICE_TYPE_MIKROTIK:
-                {
-                    // Для MikroTik используем отдельную функцию
-                    snprintf(dest_path, sizeof(dest_path), "%s/%s_%s.rsc", config_dir, safe_name, timestamp);
-                    
-                    // Вызываем функцию получения конфигурации с правильным путем
-                    result = mikrotik_scp_get(d->username, d->ip, d->password, "", dest_path);
-                    
-                    if (result == 0) {
-                        snprintf(latest_path, sizeof(latest_path), "%s/latest.rsc", config_dir);
-                        unlink(latest_path);
-                        if (symlink(dest_path, latest_path) != 0) {
-                            // Если symlink не создался, пробуем создать заново
-                            unlink(latest_path);
-                            if (symlink(dest_path, latest_path) != 0) {
-                                printf("Warning: Could not create symlink\n");
-                            }
-                        }
-                    }
-                }
-                break;
-                
-            case DEVICE_TYPE_JUNIPER:
-                {
-                    snprintf(dest_path, sizeof(dest_path), "%s/%s_%s.conf", config_dir, safe_name, timestamp);
-                    result = juniper_vmx_backup_get(d->username, d->ip, d->password, dest_path);
-                    if (result == 0) {
-                        snprintf(latest_path, sizeof(latest_path), "%s/latest.conf", config_dir);
-                        unlink(latest_path);
-                        symlink(dest_path, latest_path);
-                    }
-                }
-                break;
-                
-            default:
-                result = 1;
-                break;
-        }
+        int result = execute_device_action(&ctx);
         
         if (result == 0) {
-            printf("✓ OK -> %s\n", config_dir);
+            printf("✓ OK\n");
         } else {
+            // Получаем детали ошибки из последнего вызова
             printf("✗ FAILED\n");
-            overall_result = -1;
             failed_count++;
         }
     }
@@ -1017,84 +940,36 @@ static int execute_get_all(void) {
     printf("\nConfigs stored in: ./../../configs/<device_name>/\n");
     printf("Latest config link: ./../../configs/<device_name>/latest.*\n");
     
-    return overall_result;
+    return (failed_count == 0) ? 0 : -1;
 }
+
 
 static int execute_send_all(void) {
     size_t i;
-    int overall_result = 0;
     int failed_count = 0;
-    char safe_name[256];
-    char link_path[512];
-    char real_path[1024];
+    DeviceActionContext ctx;
     
     printf("\n=== Sending configuration to ALL devices ===\n");
     printf("Total devices: %zu\n\n", g_store.count);
     
     for (i = 0; i < g_store.count; ++i) {
-        DeviceRecord *d = &g_store.devices[i];
-        int result;
-        
-        sanitize_device_name(safe_name, sizeof(safe_name), d->name);
-        
         printf("[%zu/%zu] Sending config to: %s (%s@%s) ... ",
-               i + 1, g_store.count, d->name, d->username, d->ip);
+               i + 1, g_store.count,
+               g_store.devices[i].name,
+               g_store.devices[i].username, 
+               g_store.devices[i].ip);
         fflush(stdout);
         
-        switch (d->type) {
-            case DEVICE_TYPE_CISCO_XRV:
-                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.cfg", safe_name);
-                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
-                    printf("✗ FAILED (no config found)\n");
-                    failed_count++;
-                    overall_result = -1;
-                    continue;
-                }
-                result = put_cisco_config(d->ip, d->username, d->password, real_path);
-                break;
-            case DEVICE_TYPE_CISCO_CSR:
-                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.cfg", safe_name);
-                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
-                    printf("✗ FAILED (no config found)\n");
-                    failed_count++;
-                    overall_result = -1;
-                    continue;
-                }
-                result = send_cisco_csr_config(d->ip, d->username, d->password, real_path);
-                break;
-                
-            case DEVICE_TYPE_MIKROTIK:
-                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.rsc", safe_name);
-                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
-                    printf("✗ FAILED (no config found)\n");
-                    failed_count++;
-                    overall_result = -1;
-                    continue;
-                }
-                result = mikrotik_scp_send(d->username, d->ip, d->password, real_path, "config.rsc");
-                break;
-                
-            case DEVICE_TYPE_JUNIPER:
-                snprintf(link_path, sizeof(link_path), "./../../configs/%s/latest.conf", safe_name);
-                if (resolve_config_path(link_path, real_path, sizeof(real_path)) != 0) {
-                    printf("✗ FAILED (no config found)\n");
-                    failed_count++;
-                    overall_result = -1;
-                    continue;
-                }
-                result = juniper_vmx_backup_send(d->username, d->ip, d->password, real_path);
-                break;
-                
-            default:
-                result = 1;
-                break;
-        }
+        // Используем execute_device_action для SEND операции
+        ctx.device = &g_store.devices[i];
+        ctx.is_send = 1;  // 1 = SEND операция
+        
+        int result = execute_device_action(&ctx);
         
         if (result == 0) {
             printf("✓ OK\n");
         } else {
             printf("✗ FAILED\n");
-            overall_result = -1;
             failed_count++;
         }
     }
@@ -1103,7 +978,7 @@ static int execute_send_all(void) {
     printf("Successful: %zu\n", g_store.count - failed_count);
     printf("Failed: %d\n", failed_count);
     
-    return overall_result;
+    return (failed_count == 0) ? 0 : -1;
 }
 
 int main(void) {

@@ -4,7 +4,7 @@
 devices:
   # Cisco XRv маршрутизатор
   - name: "Cisco-xrv1"
-    type: cisco-csr
+    type: cisco-xrv
     ip: "192.168.0.199"
     username: "user"
     password: "password"  # пустой пароль
@@ -29,3 +29,10 @@ devices:
     ip: "192.168.192.106"
     username: "admin"
     password: "password"  # TODO: сменить пароль
+
+  # Cisco XRv маршрутизатор
+  - name: "Cisco-csr1"
+    type: cisco-csr
+    ip: "192.168.0.198"
+    username: "user"
+    password: "password"  # пустой пароль
