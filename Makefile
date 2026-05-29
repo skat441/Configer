@@ -12,6 +12,8 @@ SRCS := \
 	src/Cisco\ xRV/Cisco_telnet_send.c \
 	src/Cisco\ CSR/Cisco_ssh_get.c \
 	src/Cisco\ CSR/Cisco_ssh_send.c \
+	src/Cisco\ CSR/Cisco_snmp_get.c \
+	src/Cisco\ CSR/Cisco_snmp_send.c \
 	src/MikroTik/MikroTik_scp_get.c \
 	src/MikroTik/MikroTik_scp_send.c \
 	src/Juniper\ vMX/Juniper_vmx_backup.c \

@@ -6,42 +6,40 @@
 #include <unistd.h>
 
 // Конфигурация параметров
-#define TFTP_FILE_PATH     "../../configs/router-config.cfg"
-#define TFTP_FILE_NAME     "router-config.cfg"
+#define TFTP_FILE_PATH     "../../configs/routerconfig.cfg"
+#define TFTP_FILE_NAME     "routerconfig2.cfg"
 #define AGENT_IP           "11.11.11.11"
 #define TFTP_SERVER_IP     "192.168.192.53"
 #define SNMP_USER          "user"
 #define SNMP_PASSWORD      "password"
 #define SESSION_ID         "929"
 
-// Функция для создания пустого файла с полными правами на запись
-int create_tftp_stub_file() {
-    printf("[1/3] Создание локального файла-заглушки: %s\n", TFTP_FILE_PATH);
+// // Функция для создания пустого файла с полными правами на запись
+// int create_tftp_config_file() {
     
-    // Удаляем старый файл, если он был
-    unlink(TFTP_FILE_PATH);
+//     // Удаляем старый файл, если он был
+//     unlink(TFTP_FILE_PATH);
+//     mode_t old_mask = umask(0);
+//     // Создаем новый файл с правами 0666 (чтение/запись всем)
+//     int fd = open(TFTP_FILE_PATH, O_RDWR | O_CREAT | O_TRUNC, 0666);
+//     if (fd < 0) {
+//         perror("Ошибка создания файла на TFTP-сервере");
+//         return 0;
+//     }
+//     umask(old_mask);
+//     close(fd);
+//     return 1;
+// }
 
-    // Создаем новый файл с правами 0666 (чтение/запись всем)
-    int fd = open(TFTP_FILE_PATH, O_WRONLY | O_CREAT | O_TRUNC, 0666);
-    if (fd < 0) {
-        perror("Ошибка создания файла на TFTP-сервере");
-        return 0;
-    }
-    close(fd);
-    printf("Файл успешно создан и открыт для записи.\n");
-    return 1;
-}
-
-int main(int argc, char **argv) {
+int get_cisco_csr_config_snmp() {
     char cmd_buffer[2048];
 
     // 1. Подготавливаем файл на TFTP
-    if (!create_tftp_stub_file()) {
-        exit(1);
-    }
+    // if (!create_tftp_config_file()) {
+    //     exit(1);
+    // }
     sleep(1);
     // 2. Предварительно очищаем старую сессию на Cisco (на случай, если она зависла)
-    printf("[2/3] Очистка старой SNMP сессии (ID: %s)...\n", SESSION_ID);
     snprintf(cmd_buffer, sizeof(cmd_buffer),
              "snmpset -v 3 -l authNoPriv -u %s -a SHA -A %s %s .1.3.6.1.4.1.9.9.96.1.1.1.1.14.%s i 6 > /dev/null 2>&1",
              SNMP_USER, SNMP_PASSWORD, AGENT_IP, SESSION_ID);
@@ -49,7 +47,6 @@ int main(int argc, char **argv) {
     sleep(1); // Небольшая пауза, чтобы Cisco успела обработать сброс
 
     // 3. Формируем и выполняем единую команду snmpset для копирования конфигурации
-    printf("[3/3] Вызов snmpset для копирования конфигурации через TFTP...\n");
     snprintf(cmd_buffer, sizeof(cmd_buffer),
              "snmpset -v 3 -l authNoPriv -u %s -a SHA -A %s %s "
              ".1.3.6.1.4.1.9.9.96.1.1.1.1.2.%s i 1 "
@@ -63,9 +60,6 @@ int main(int argc, char **argv) {
              SESSION_ID, TFTP_SERVER_IP, 
              SESSION_ID, TFTP_FILE_NAME, 
              SESSION_ID);
-
-    // Выводим команду в консоль для наглядности дебага
-    printf("\nВыполняется системная команда:\n%s\n\n", cmd_buffer);
 
     // Запуск через shell
     int exit_status = system(cmd_buffer);
